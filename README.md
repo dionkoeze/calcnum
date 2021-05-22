@@ -44,13 +44,15 @@ We say a node is *valid* when it is evaluable and all numbers *x<sub>1</sub>, ..
 ## Strategies
 
 ### Naive
-First strategy is to simply do an exhaustive search in this space. 
+First strategy is to simply do an exhaustive search in this space. The search is depth first, so it can be programmed recursively. 
+
+### DFS with memoization
+While searching we encounter partial evaluable calculations. We can cache these and whenever a tree has 1 open node remaining check if we have already encountered the value needed to compute the exact number. 
+
+Interestingly this does not lead to any improvement. Probably because the search order prevents caching any set of remaining numbers that are left in the search tree. This could be an artefact of DFS from left to right. Let's explore more later.
 
 ### A*
 
-### Depth first with branch and bound?
-
-### Store invalid evaluable calculations
 
 ## Metrics
 We can use wall clock time as general metric. When doing further optimizations we can use the count of explored nodes in the search tree as metric. 
