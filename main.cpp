@@ -54,7 +54,12 @@ struct Expr {
     virtual set<double> numbers() =0;
 
     // for heuristics in A*
-    virtual double evalaluate_missing(double missing) =0;
+    virtual bool is_open() =0;
+    virtual double evaluate_missing() =0;
+
+    // for uniqueness
+    virtual string order() =0;
+    virtual bool sorted() =0;
 
     // printing
     virtual string to_string() =0;
@@ -101,6 +106,23 @@ struct Open : Expr {
 
     virtual set<double> numbers() {
         return set<double>();
+    }
+
+    virtual bool is_open() {
+        return true;
+    }
+
+    virtual double evaluate_missing() {
+        // throw OpenNodeEvalException();
+        return 0.;
+    }
+
+    virtual string order() {
+        return "o";
+    }
+
+    virtual bool sorted() {
+        return true;
     }
 
     virtual string to_string() {
@@ -215,10 +237,47 @@ struct Op : Expr {
         return result;
     }
 
+    virtual bool is_open() {
+        return left->is_open() && right->is_open();
+    }
+
+    virtual double evaluate_missing() {
+        if (left->is_open()) {
+            return right->evaluate_missing();
+        } else if (right->is_open()) {
+            return left->evaluate_missing();
+        } else {
+            return 0.;
+        }
+    }
+
+    virtual string order() {
+        return string("") + C::repr;
+    }
+
+    virtual bool sorted() {
+        if (left->sorted() && right->sorted()) {
+            if (C::repr == '+' || C::repr == '*') {
+                return left->order() < right->order();
+            } else {
+                return true;
+            }
+        } else {
+            return false;
+        }
+    }
+
     virtual string to_string() {
         return string() + C::repr + " " + left->to_string() + " " + right->to_string();
     }
 };
+
+template <>
+bool Op<Add>::sorted() {
+
+
+    return left->sorted() && right->sorted();
+}
 
 
 // literal (a number) in expression tree
@@ -249,6 +308,22 @@ struct Lit : Expr {
 
     virtual set<double> numbers() {
         return set<double>({value});
+    }
+
+    virtual bool is_open() {
+        return false;
+    }
+
+    virtual double evaluate_missing() {
+        return value;
+    }
+
+    virtual string order() {
+        return std::to_string((int)value);
+    }
+
+    virtual bool sorted() {
+        return true;
     }
 
     virtual string to_string() {
@@ -395,45 +470,96 @@ A* SEARCH
 
 struct Node {
     shared_ptr<Expr> expr;
-    int dist;
+    double dist;
     set<double> numbers;
 
-    Node(shared_ptr<Expr> expr, int dist, set<double> numbers) : expr(expr), dist(dist), numbers(numbers) {}
+    Node(shared_ptr<Expr> expr, double dist, set<double> numbers) : expr(expr), dist(dist), numbers(numbers) {}
 };
 
 bool operator<(const Node &lhs, const Node &rhs) {
-    return lhs.dist < rhs.dist;
+    return lhs.dist > rhs.dist;
 }
 
-Best astar(int target, set<double> numbers, long long &explored) {
+Best emplace(shared_ptr<Expr> expr, double target, set<double> numbers, priority_queue<Node> &q, function<double(shared_ptr<Expr>)> heuristic, Best &best, map<set<double>, map<double, shared_ptr<Expr>>> &mem, bool use_mem, bool use_uniq_queue, long long &explored) {
+    explored++;
+
+    // only emplace if the expression is not evaluable
+    if (expr->evaluable()) {
+        if (numbers.empty()) {
+            // return Best(expr);
+            Best opt = Best(expr);
+            if (better(opt, best, target)) best = opt;
+        }
+
+        if (use_mem) {
+            try {
+                double outcome = expr->evaluate();
+                mem[expr->numbers()][outcome] = expr;
+            } catch (DivisionByZeroException &e) {}
+        }
+    } else {
+        if (use_uniq_queue) {
+            // TODO check uniqueness before emplacing
+            if (expr->sorted()) {
+                q.emplace(expr, heuristic(expr), numbers);
+            }
+        } else {
+            // always emplace
+            q.emplace(expr, heuristic(expr), numbers);
+        }
+    }
+
+    return Best();
+}
+
+Best astar(int target, set<double> numbers, long long &explored, bool use_mem, bool use_uniq_queue, function<double(shared_ptr<Expr>)> heuristic) {
     Best best;
 
     priority_queue<Node> q;
-    q.emplace(make_shared<Open>(), target, numbers);
+    shared_ptr<Expr> root = make_shared<Open>();
+    q.emplace(root, heuristic(root), numbers);
+    explored++;
+
+    map<set<double>, map<double, shared_ptr<Expr>>> mem;
 
     while (!q.empty() && best.value != target) {
-        explored++;
-
         Node cur = q.top();
         q.pop();
 
-        // check for improvement
-        if (cur.expr->evaluable() && cur.numbers.empty()) {
-            Best opt(cur.expr);
-            if (better(opt, best, target)) best = opt;
+        if (use_mem && cur.expr->size() == 1) {
+            try {
+                double required = cur.expr->required(target);
+                auto it = mem[cur.numbers].find(required);
+                if (it != mem[cur.numbers].end()) {
+                    shared_ptr<Expr> answer = clone_and_fill(cur.expr, it->second);
+                    best = Best(answer);
+                    return best;
+                }
+            } catch (DivisionByZeroException &e) {}
         }
-        // expand children
-        else {
-            for (double number : cur.numbers) {
-                shared_ptr<Expr> expr = clone_and_fill(cur.expr, make_shared<Lit>(number));
-                set<double> next_numbers(cur.numbers);
-                next_numbers.erase(number);
-                q.emplace(expr, target, next_numbers);
-            }
 
-            if (cur.expr->size() < cur.numbers.size()) {
-                q.emplace(clone_and_fill(cur.expr, make_shared<Op<Add>>()), target, cur.numbers);
-            }
+        // expand children
+        for (double number : cur.numbers) {
+            shared_ptr<Expr> expr = clone_and_fill(cur.expr, make_shared<Lit>(number));
+            set<double> next_numbers(cur.numbers);
+            next_numbers.erase(number);
+
+            emplace(expr, target, next_numbers, q, heuristic, best, mem, use_mem, use_uniq_queue, explored);
+            
+        }
+
+        if (cur.expr->size() < cur.numbers.size()) {
+            shared_ptr<Expr> add = clone_and_fill(cur.expr, make_shared<Op<Add>>());
+            emplace(add, target, cur.numbers, q, heuristic, best, mem, use_mem, use_uniq_queue, explored);
+
+            shared_ptr<Expr> sub = clone_and_fill(cur.expr, make_shared<Op<Sub>>());
+            emplace(sub, target, cur.numbers, q, heuristic, best, mem, use_mem, use_uniq_queue, explored);
+
+            shared_ptr<Expr> mul = clone_and_fill(cur.expr, make_shared<Op<Mul>>());
+            emplace(mul, target, cur.numbers, q, heuristic, best, mem, use_mem, use_uniq_queue, explored);
+
+            shared_ptr<Expr> div = clone_and_fill(cur.expr, make_shared<Op<Div>>());
+            emplace(div, target, cur.numbers, q, heuristic, best, mem, use_mem, use_uniq_queue, explored);
         }
     }
 
@@ -465,7 +591,8 @@ struct Metrics {
 };
 
 ostream& operator<<(ostream &os, const Metrics &metrics) {
-    os << "best: " << metrics.best << ", explored " << metrics.explored << " nodes in " << metrics.s 
+    os << "best: " << std::setfill(' ') << std::setw(30) << metrics.best << ", explored " << std::setfill(' ') << std::setw(10) << metrics.explored << " nodes in "
+        << std::setfill('0') << std::setw(3) << metrics.s 
         << " . " << std::setfill('0') << std::setw(3) << metrics.ms 
         << " " << std::setfill('0') << std::setw(3) << metrics.us 
         << " " << std::setfill('0') << std::setw(3) << metrics.ns << " seconds";
@@ -481,13 +608,7 @@ Metrics run(function<Best(long long&)> task) {
     return Metrics(best, explored, chrono::duration_cast<chrono::nanoseconds> (end - begin).count());
 }
 
-int main() {
-    // double target = 728.0;
-    // set<double> numbers = {6.,10.,25.,75.,5.,50.};
-
-    double target = 2500.0;
-    set<double> numbers = {1.,2.,3.,4.,5.};
-
+void run_test(double target, set<double> numbers) {
     cout << "target: " << target << endl;
     cout << "numbers: ";
     for (double number : numbers) cout << number << " ";
@@ -496,18 +617,45 @@ int main() {
     Metrics m_dfs = run([target, numbers](long long &explored){
         return dfs(make_shared<Open>(), target, numbers, Best(), explored);
     });
-    cout << "DFS    " << m_dfs << endl;
+    cout << "DFS        " << m_dfs << endl;
 
-    Metrics m_dfs_mem = run([target, numbers](long long &explored){
-        map<set<double>, map<double, shared_ptr<Expr>>> mem;
-        return dfs_mem(make_shared<Open>(), target, numbers, Best(), explored, mem);
+    Metrics astar_count = run([target, numbers](long long &explored){
+        return astar(target, numbers, explored, false, false, [numbers](shared_ptr<Expr> expr){ return numbers.size() - expr->numbers().size(); });
     });
-    cout << "DFSMEM " << m_dfs_mem << endl;
+    cout << "SRCH CNT   " << astar_count << endl;
 
-    Metrics astar_dfs = run([target, numbers](long long &explored){
-        return astar(target, numbers, explored);
+    Metrics astar_diff = run([target, numbers](long long &explored){
+        return astar(target, numbers, explored, false, false, [target](shared_ptr<Expr> expr){ return abs(target - expr->evaluate_missing()); });
     });
-    cout << "A*     " << astar_dfs << endl;
+    cout << "SRCH DIFF  " << astar_diff << endl;
+
+    Metrics astar_frac = run([target, numbers](long long &explored){
+        return astar(target, numbers, explored, false, false, [target](shared_ptr<Expr> expr){ 
+            double div = target / expr->evaluate_missing(); 
+            if (div < 1.0) div = 1. / div;
+            return div;
+        });
+    });
+    cout << "SRCH DV LG " << astar_frac << endl;
+
+    Metrics astar_div = run([target, numbers](long long &explored){
+        return astar(target, numbers, explored, false, false, [target](shared_ptr<Expr> expr){ 
+            double div = target / expr->evaluate_missing(); 
+            if (div > 1.0) div = 1. / div;
+            return div;
+        });
+    });
+    cout << "SRCH DV SM " << astar_div << endl;
+}
+
+int main() {
+    run_test(25.0, {1., 2., 3., 4.});
+    run_test(525.0, {5., 7., 10., 13});
+    run_test(25.0, {1., 2., 3., 4., 5.});
+    run_test(147.0, {4., 5., 8., 20., 27.});
+    run_test(432.0, {3., 5., 7., 11., 13.});
+    run_test(737.0, {1., 4., 5., 6., 7., 25.});
+    run_test(728.0, {6., 10., 25., 75., 5., 50.});
 
     return 0;
 }
